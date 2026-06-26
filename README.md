@@ -2,19 +2,18 @@
 
 自动抓取/测活公开 SOCKS5 代理，暴露本地代理网关，支持按国家/IP 切换。
 
-## 启动
+## 安装
 
 ```bash
-# 直接运行（前台）
-python3 gateway.py
-
-# systemd 服务
-sudo mkdir -p /opt/socks5-proxy-pool /var/lib/socks5-proxy-pool
-sudo cp gateway.py cli.py /opt/socks5-proxy-pool/
-sudo cp socks5-gateway.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now socks5-gateway
+bash <(curl -fsSL https://raw.githubusercontent.com/youshang8520/socks5-proxy-pool/master/install.sh)
 ```
+
+安装完成后：
+- 本地代理自动启动：`socks5://127.0.0.1:7929`
+- 管理 CLI：`python3 /opt/socks5-proxy-pool/cli.py`
+- 查看日志：`journalctl -u socks5-gateway -f`
+
+
 
 守护进程会：
 1. 从3个来源并联抓取 SOCKS5 代理
