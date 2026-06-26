@@ -14,6 +14,7 @@ CONTROL_PORT   = int(os.environ.get("CONTROL_PORT", "7930"))
 TEST_TIMEOUT   = int(os.environ.get("TEST_TIMEOUT", "5"))
 TEST_WORKERS   = int(os.environ.get("TEST_WORKERS", "150"))
 FETCH_INTERVAL = int(os.environ.get("FETCH_INTERVAL", "1800"))
+FAIL_THRESHOLD = int(os.environ.get("FAIL_THRESHOLD", "3"))   # 连续失败几次才换代理
 GEO_BATCH      = 100
 POOL_FILE      = Path(os.environ.get("POOL_FILE", "pool.json"))
 
@@ -128,6 +129,7 @@ class ProxyPool:
     def __init__(self):
         self._proxies = []
         self._current = None
+        self._fail_count = 0
         self._lock = threading.Lock()
         self._load()
 
@@ -177,6 +179,25 @@ class ProxyPool:
                 idx = -1
             self._current = self._proxies[(idx + 1) % len(self._proxies)]
             return self._current
+
+    def mark_success(self):
+        with self._lock:
+            self._fail_count = 0
+
+    def mark_failure(self):
+        with self._lock:
+            self._fail_count += 1
+            if self._fail_count >= FAIL_THRESHOLD:
+                self._fail_count = 0
+                if not self._proxies:
+                    return
+                try:
+                    idx = self._proxies.index(self._current)
+                except ValueError:
+                    idx = -1
+                self._current = self._proxies[(idx + 1) % len(self._proxies)]
+                print("[pool] 代理失效，已切换到 {}:{}".format(
+                    self._current["ip"], self._current["port"]), flush=True)
 
     @property
     def current(self):
@@ -255,10 +276,11 @@ def _handle_client(client):
             client.close()
             return
         up = _socks5_upstream_connect(proxy, host, port)
+        pool.mark_success()
         client.sendall(b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00")
         _relay(client, up)
     except Exception:
-        pool.rotate()
+        pool.mark_failure()
         client.close()
 
 
