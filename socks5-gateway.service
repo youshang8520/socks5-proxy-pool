@@ -9,7 +9,12 @@ WorkingDirectory=/opt/socks5-proxy-pool
 ExecStart=/usr/bin/python3.12 /opt/socks5-proxy-pool/gateway.py
 Restart=on-failure
 RestartSec=10
+Environment=PROXY_HOST=127.0.0.1
 Environment=POOL_FILE=/var/lib/socks5-proxy-pool/pool.json
+Environment=OPENVPN_POOL_FILE=/var/lib/socks5-proxy-pool/openvpn.json
+Environment=OPENVPN_CONFIG_DIR=/var/lib/socks5-proxy-pool/openvpn-configs
+Environment=OPENVPN_ENABLED=1
+Environment=OPENVPN_SOURCES=https://publicvpnlist.com/country/usa/
 
 [Install]
 WantedBy=multi-user.target

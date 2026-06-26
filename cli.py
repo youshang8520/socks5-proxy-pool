@@ -111,12 +111,65 @@ def manual_fetch():
     _get("/refresh")
     print("已触发手动抓取（后台执行）")
 
+
+def vpn_status():
+    s = _get("/vpn/status")
+    print("\nOpenVPN抓取: {}".format("已启用" if s.get("enabled") else "未启用"))
+    print("配置总数: {}".format(s.get("total", 0)))
+    cur = s.get("current") or {}
+    if cur:
+        print("当前配置: {}  {}:{} {}".format(
+            cur.get("id", ""), cur.get("remote_host", ""),
+            cur.get("remote_port", ""), cur.get("proto", "")))
+    print("配置目录: {}".format(s.get("config_dir", "")))
+    sources = s.get("sources") or []
+    if sources:
+        print("来源:")
+        for u in sources:
+            print("  - {}".format(u))
+
+
+def vpn_fetch():
+    _get("/vpn/refresh")
+    print("已触发OpenVPN手动抓取（后台执行）")
+
+
+def vpn_select():
+    configs = _get("/vpn/configs")
+    if not configs:
+        print("暂无OpenVPN配置，请先手动抓取")
+        return
+    print()
+    for i, c in enumerate(configs, 1):
+        warn = " 有警告" if c.get("warnings") else ""
+        auth = " 需认证" if c.get("requires_auth") else ""
+        print("  {:3d}. {}  {}:{}  {}{}{}".format(
+            i, c.get("id", ""), c.get("remote_host", ""),
+            c.get("remote_port", ""), c.get("proto", ""), auth, warn))
+    print()
+    idx = input("输入序号（回车取消）: ").strip()
+    if not idx:
+        return
+    try:
+        c = configs[int(idx) - 1]
+    except (ValueError, IndexError):
+        print("无效输入")
+        return
+    res = _post("/vpn/select", {"id": c.get("id")})
+    if res.get("ok"):
+        print("已选择OpenVPN配置: {}".format(c.get("id")))
+    else:
+        print("选择失败")
+
 MENU = [
     ("按国家切换", select_country),
     ("按IP切换",   select_ip),
     ("轮换下一个", rotate),
     ("手动抓取",   manual_fetch),
     ("刷新代理池", refresh),
+    ("OpenVPN状态", vpn_status),
+    ("OpenVPN手动抓取", vpn_fetch),
+    ("OpenVPN选择配置", vpn_select),
 ]
 
 def main():

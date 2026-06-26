@@ -3,12 +3,12 @@
 本地 SOCKS5:7929，自动抓取/测活/轮换上游代理
 控制 API: http://127.0.0.1:7930
 """
-import json, os, re, signal, socket, ssl, struct, threading, time, urllib.request
+import hashlib, json, os, re, signal, socket, ssl, struct, threading, time, urllib.parse, urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-LOCAL_HOST     = os.environ.get("PROXY_HOST", "0.0.0.0")
+LOCAL_HOST     = os.environ.get("PROXY_HOST", "127.0.0.1")
 LOCAL_PORT     = int(os.environ.get("PROXY_PORT", "7929"))
 CONTROL_PORT   = int(os.environ.get("CONTROL_PORT", "7930"))
 TEST_TIMEOUT   = int(os.environ.get("TEST_TIMEOUT", "5"))
@@ -19,8 +19,19 @@ MIN_POOL_SIZE  = int(os.environ.get("MIN_POOL_SIZE",  "5"))       # 低于此数
 MANUAL_REFRESH_ONLY = os.environ.get("MANUAL_REFRESH_ONLY", "0") == "1"   # 仅手动抓取
 FILTER_RISK    = os.environ.get("FILTER_RISK", "1") == "1"   # 过滤高风控IP（proxy/hosting）
 VERIFY_TLS     = os.environ.get("VERIFY_TLS", "1") == "1"    # 校验证书链，确保HTTPS可用
+FAIL_THRESHOLD = int(os.environ.get("FAIL_THRESHOLD", "3"))   # 连续失败几次才换代理
 GEO_BATCH      = 100
 POOL_FILE      = Path(os.environ.get("POOL_FILE", "pool.json"))
+OPENVPN_ENABLED = os.environ.get("OPENVPN_ENABLED", "1") == "1"
+OPENVPN_POOL_FILE = Path(os.environ.get("OPENVPN_POOL_FILE", "openvpn.json"))
+OPENVPN_CONFIG_DIR = Path(os.environ.get("OPENVPN_CONFIG_DIR", "openvpn-configs"))
+OPENVPN_FETCH_TIMEOUT = int(os.environ.get("OPENVPN_FETCH_TIMEOUT", "20"))
+OPENVPN_MAX_DOWNLOADS = int(os.environ.get("OPENVPN_MAX_DOWNLOADS", "30"))
+OPENVPN_SOURCES = [
+    u.strip() for u in os.environ.get(
+        "OPENVPN_SOURCES", "https://publicvpnlist.com/country/usa/"
+    ).split(",") if u.strip()
+]
 
 SOURCES = [
     "https://api.proxyscrape.com/v4/free-proxy-list/get"
@@ -56,6 +67,152 @@ def fetch_raw():
             if e not in seen:
                 seen.add(e); result.append(e)
     return result
+
+
+# ── OpenVPN 配置抓取 ───────────────────────────────────────────────────────────
+_OVPN_DANGEROUS = (
+    "script-security", "up", "down", "route-up", "route-pre-down",
+    "ipchange", "client-connect", "client-disconnect", "learn-address",
+    "auth-user-pass-verify", "tls-verify", "plugin",
+)
+
+
+def _safe_openvpn_id(url):
+    p = urllib.parse.urlparse(url)
+    raw = "{}-{}".format(p.netloc, p.path.strip("/") or "openvpn")
+    base = re.sub(r"[^a-zA-Z0-9_.-]+", "-", raw).strip("-").lower() or "openvpn"
+    digest = hashlib.sha1(url.encode()).hexdigest()[:8]
+    return "{}-{}".format(base[:70], digest)
+
+
+def _looks_like_ovpn(text):
+    low = text[:2048].lower()
+    if "<html" in low or "<!doctype html" in low:
+        return False
+    markers = ["client", "remote ", "dev tun", "dev tap", "proto ", "<ca>"]
+    return sum(1 for m in markers if m in low) >= 3 and "remote " in low
+
+
+def _parse_ovpn_metadata(cfg_id, url, text, path, source_meta=None):
+    source_meta = source_meta or {}
+    remote_host, remote_port = "", ""
+    proto, dev = "", ""
+    warnings = []
+    for line in text.splitlines():
+        s = line.strip()
+        if not s or s.startswith("#") or s.startswith(";"):
+            continue
+        parts = s.split()
+        key = parts[0].lower()
+        if key == "remote" and len(parts) >= 3 and not remote_host:
+            remote_host, remote_port = parts[1], parts[2]
+        elif key == "proto" and len(parts) >= 2 and not proto:
+            proto = parts[1]
+        elif key == "dev" and len(parts) >= 2 and not dev:
+            dev = parts[1]
+        elif key in _OVPN_DANGEROUS:
+            warnings.append("dangerous-directive:{}".format(key))
+    return {
+        "id": cfg_id,
+        "url": url,
+        "source": source_meta.get("source") or url,
+        "country": source_meta.get("country") or source_meta.get("country_code") or "XX",
+        "file": str(path),
+        "remote_host": remote_host or source_meta.get("host", ""),
+        "remote_port": remote_port or source_meta.get("port", ""),
+        "proto": proto or (source_meta.get("proto", "unknown").lower()),
+        "dev": dev or "unknown",
+        "speed": source_meta.get("speed", ""),
+        "latency": source_meta.get("latency", ""),
+        "score": source_meta.get("score", ""),
+        "checked_at": source_meta.get("checked", ""),
+        "requires_auth": "auth-user-pass" in text,
+        "warnings": sorted(set(warnings)),
+        "fetched_at": time.time(),
+    }
+
+
+def _download_text(url):
+    req = urllib.request.Request(url, headers={"User-Agent": "socks5-proxy-pool/1.0"})
+    with urllib.request.urlopen(req, timeout=OPENVPN_FETCH_TIMEOUT) as r:
+        raw = r.read(1024 * 1024)
+    return raw.decode("utf-8", errors="ignore")
+
+
+def _extract_openvpn_downloads(source_url, text):
+    downloads = []
+    seen = set()
+
+    def add(url, attrs):
+        if url in seen or len(downloads) >= OPENVPN_MAX_DOWNLOADS:
+            return
+        seen.add(url)
+        downloads.append({
+            "url": url,
+            "source": source_url,
+            "country": attrs.get("data-download-country") or attrs.get("data-country-name", ""),
+            "country_code": attrs.get("data-download-code") or attrs.get("data-country", ""),
+            "host": attrs.get("data-download-host") or attrs.get("data-download-ip") or attrs.get("data-host") or attrs.get("data-ip", ""),
+            "port": attrs.get("data-download-port") or attrs.get("data-port", ""),
+            "proto": attrs.get("data-download-proto") or attrs.get("data-proto", ""),
+            "speed": attrs.get("data-download-speed") or attrs.get("data-speed", ""),
+            "latency": attrs.get("data-download-latency") or attrs.get("data-latency", ""),
+            "checked": attrs.get("data-download-checked") or attrs.get("data-checked-at", ""),
+            "score": attrs.get("data-download-score", ""),
+        })
+
+    for m in re.finditer(r"<tr\b[^>]*data-id=[\"'](\d+)[\"'][^>]*>", text, re.I):
+        tag = m.group(0)
+        attrs = {k: v for k, v in re.findall(r"([a-zA-Z0-9_-]+)=[\"']([^\"']*)[\"']", tag)}
+        dl = urllib.parse.urljoin(source_url, "/download/{}/".format(attrs.get("data-id") or m.group(1)))
+        add(dl, attrs)
+
+    for m in re.finditer(r"<a\b[^>]*href=[\"']([^\"']*/download/\d+/[^\"']*)[\"'][^>]*>", text, re.I):
+        tag = m.group(0)
+        attrs = {k: v for k, v in re.findall(r"([a-zA-Z0-9_-]+)=[\"']([^\"']*)[\"']", tag)}
+        add(urllib.parse.urljoin(source_url, m.group(1)), attrs)
+
+    return downloads
+
+
+def _openvpn_source_items(source_url):
+    text = _download_text(source_url)
+    if _looks_like_ovpn(text):
+        return [{"url": source_url, "text": text, "meta": {"source": source_url}}]
+    downloads = _extract_openvpn_downloads(source_url, text)
+    if not downloads:
+        raise ValueError("no OpenVPN download links found")
+    items = []
+    for d in downloads:
+        try:
+            cfg_text = _download_text(d["url"])
+            if not _looks_like_ovpn(cfg_text):
+                raise ValueError("not an OpenVPN config")
+            items.append({"url": d["url"], "text": cfg_text, "meta": d})
+        except Exception as e:
+            print("[openvpn] 下载失败 {}: {}".format(d["url"], e), flush=True)
+    return items
+
+
+def fetch_openvpn_configs():
+    if not OPENVPN_ENABLED:
+        return []
+    OPENVPN_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    results = []
+    for source_url in OPENVPN_SOURCES:
+        try:
+            items = _openvpn_source_items(source_url)
+        except Exception as e:
+            print("[openvpn] 抓取失败 {}: {}".format(source_url, e), flush=True)
+            continue
+        for item in items:
+            cfg_id = _safe_openvpn_id(item["url"])
+            path = OPENVPN_CONFIG_DIR / (cfg_id + ".ovpn")
+            path.write_text(item["text"])
+            results.append(_parse_ovpn_metadata(
+                cfg_id, item["url"], item["text"], path, item.get("meta")))
+        print("[openvpn] 来源 {} 抓取 {} 个配置".format(source_url, len(items)), flush=True)
+    return results
 
 
 # ── IP 地理定位 ───────────────────────────────────────────────────────────────
@@ -257,7 +414,67 @@ class ProxyPool:
         return dict(sorted(cnt.items(), key=lambda x: -x[1]))
 
 
+class OpenVPNPool:
+    def __init__(self):
+        self._configs = []
+        self._current = None
+        self._lock = threading.Lock()
+        self._load()
+
+    def _load(self):
+        if OPENVPN_POOL_FILE.exists():
+            try:
+                data = json.loads(OPENVPN_POOL_FILE.read_text())
+                self._configs = data.get("configs", [])
+                cur = data.get("current")
+                self._current = next(
+                    (c for c in self._configs if c["id"] == (cur or {}).get("id")), None)
+            except Exception:
+                pass
+
+    def save(self):
+        OPENVPN_POOL_FILE.write_text(json.dumps(
+            {"configs": self._configs, "current": self._current,
+             "updated_at": time.time()}, indent=2, ensure_ascii=False))
+
+    def update(self, configs):
+        with self._lock:
+            cur_id = (self._current or {}).get("id")
+            self._configs = configs
+            self._current = next((c for c in configs if c["id"] == cur_id), None)
+            if not self._current:
+                self._current = configs[0] if configs else None
+            self.save()
+
+    def select(self, cfg_id=None):
+        with self._lock:
+            if not cfg_id:
+                return False
+            cur = next((c for c in self._configs if c["id"] == cfg_id), None)
+            if not cur:
+                return False
+            self._current = cur
+            self.save()
+            return True
+
+    def countries(self):
+        cnt = {}
+        for c in self._configs:
+            cc = c.get("country") or "XX"
+            cnt[cc] = cnt.get(cc, 0) + 1
+        return dict(sorted(cnt.items(), key=lambda x: -x[1]))
+
+    @property
+    def current(self):
+        return self._current
+
+    @property
+    def configs(self):
+        return self._configs
+
+
 pool = ProxyPool()
+openvpn_pool = OpenVPNPool()
 
 
 # ── 本地 SOCKS5 代理（链式转发到上游）────────────────────────────────────────
@@ -366,6 +583,11 @@ class _ControlHandler(BaseHTTPRequestHandler):
                 "total": len(pool.proxies),
                 "countries": pool.countries(),
                 "local": "socks5://{}:{}".format(LOCAL_HOST, LOCAL_PORT),
+                "openvpn": {
+                    "enabled": OPENVPN_ENABLED,
+                    "current": openvpn_pool.current,
+                    "total": len(openvpn_pool.configs),
+                },
             })
         elif p == "/proxies":
             cc = (self.path.split("country=")[-1] if "country=" in self.path else None)
@@ -375,6 +597,23 @@ class _ControlHandler(BaseHTTPRequestHandler):
         elif p == "/refresh":
             threading.Thread(target=_do_refresh, daemon=True).start()
             self._json({"msg": "refresh started"})
+        elif p == "/vpn/status":
+            self._json({
+                "enabled": OPENVPN_ENABLED,
+                "current": openvpn_pool.current,
+                "total": len(openvpn_pool.configs),
+                "countries": openvpn_pool.countries(),
+                "sources": OPENVPN_SOURCES,
+                "config_dir": str(OPENVPN_CONFIG_DIR),
+            })
+        elif p == "/vpn/configs":
+            self._json(openvpn_pool.configs)
+        elif p == "/vpn/refresh":
+            if not OPENVPN_ENABLED:
+                self._json({"error": "openvpn disabled"}, 400)
+            else:
+                threading.Thread(target=_do_openvpn_refresh, daemon=True).start()
+                self._json({"msg": "openvpn refresh started"})
         else:
             self._json({"error": "not found"}, 404)
 
@@ -384,6 +623,9 @@ class _ControlHandler(BaseHTTPRequestHandler):
         if self.path == "/select":
             ok = pool.select(country=body.get("country"), ip=body.get("ip"))
             self._json({"ok": ok, "current": pool.current})
+        elif self.path == "/vpn/select":
+            ok = openvpn_pool.select(cfg_id=body.get("id"))
+            self._json({"ok": ok, "current": openvpn_pool.current})
         else:
             self._json({"error": "not found"}, 404)
 
@@ -398,6 +640,12 @@ def _do_refresh():
     if proxies:
         pool.update(proxies)
         _last_fetch_time = time.monotonic()
+
+
+def _do_openvpn_refresh():
+    configs = fetch_openvpn_configs()
+    if configs:
+        openvpn_pool.update(configs)
 
 
 def _test_only():

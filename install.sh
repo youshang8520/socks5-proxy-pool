@@ -4,6 +4,7 @@ set -e
 REPO="https://github.com/youshang8520/socks5-proxy-pool"
 INSTALL_DIR=/opt/socks5-proxy-pool
 DATA_DIR=/var/lib/socks5-proxy-pool
+OPENVPN_CONFIG_DIR=${DATA_DIR}/openvpn-configs
 SERVICE=socks5-gateway
 
 echo "==> 检查依赖..."
@@ -20,8 +21,8 @@ else
 fi
 
 echo "==> 创建数据目录..."
-mkdir -p "${DATA_DIR}"
-chown nobody "${DATA_DIR}"
+mkdir -p "${DATA_DIR}" "${OPENVPN_CONFIG_DIR}"
+chown -R nobody "${DATA_DIR}"
 
 echo "==> 安装 systemd 服务..."
 sed "s|/usr/bin/python3.12|${PYTHON}|g;
