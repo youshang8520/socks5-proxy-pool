@@ -173,7 +173,10 @@ pool = ProxyPool()
 def _relay(a: socket.socket, b: socket.socket) -> None:
     def pipe(src, dst):
         try:
-            while chunk := src.recv(4096):
+            while True:
+                chunk = src.recv(4096)
+                if not chunk:
+                    break
                 dst.sendall(chunk)
         except Exception:
             pass
