@@ -1,0 +1,15 @@
+[Unit]
+Description=SOCKS5 Proxy Pool Gateway
+After=network.target
+
+[Service]
+Type=simple
+User=nobody
+WorkingDirectory=/opt/socks5-proxy-pool
+ExecStart=/usr/bin/python3 /opt/socks5-proxy-pool/gateway.py
+Restart=on-failure
+RestartSec=10
+Environment=POOL_FILE=/var/lib/socks5-proxy-pool/pool.json
+
+[Install]
+WantedBy=multi-user.target

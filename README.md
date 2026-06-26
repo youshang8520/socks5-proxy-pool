@@ -5,8 +5,15 @@
 ## 启动
 
 ```bash
-pip install -q requests  # 无额外依赖，标准库即可
-python gateway.py        # 启动守护进程（前台）
+# 直接运行（前台）
+python3 gateway.py
+
+# systemd 服务
+sudo mkdir -p /opt/socks5-proxy-pool /var/lib/socks5-proxy-pool
+sudo cp gateway.py cli.py /opt/socks5-proxy-pool/
+sudo cp socks5-gateway.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now socks5-gateway
 ```
 
 守护进程会：
@@ -26,15 +33,6 @@ python cli.py   # 交互式管理终端
 - 按国家/IP 手动选择上游代理
 - 随机轮换
 - 触发手动刷新
-
-## 模式切换
-
-| 模式 | 本地代理 | 管理方式 |
-|------|----------|----------|
-| AimiliVPN (OpenVPN) | `socks5://127.0.0.1:7928` | aimili 守护进程 |
-| SOCKS5 池 | `socks5://127.0.0.1:7929` | 本项目 |
-
-客户端（v2ray/浏览器）切换端口即可切换模式，两个守护进程互不影响。
 
 ## 环境变量
 

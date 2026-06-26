@@ -4,7 +4,7 @@
 控制 API: http://127.0.0.1:7930
 """
 from __future__ import annotations
-import json, os, re, socket, ssl, struct, threading, time, urllib.request
+import json, os, re, signal, socket, ssl, struct, threading, time, urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -313,6 +313,16 @@ def _refresh_loop() -> None:
 
 # ── 主入口 ────────────────────────────────────────────────────────────────────
 def main() -> None:
+    _stop = threading.Event()
+
+    def _shutdown(sig, _frame):
+        print(f"\n[exit] signal {sig}", flush=True)
+        pool.save()
+        _stop.set()
+
+    signal.signal(signal.SIGTERM, _shutdown)
+    signal.signal(signal.SIGINT, _shutdown)
+
     _ProxyServer().start()
 
     ctrl = ThreadingHTTPServer(("127.0.0.1", CONTROL_PORT), _ControlHandler)
@@ -321,11 +331,7 @@ def main() -> None:
 
     threading.Thread(target=_refresh_loop, daemon=True).start()
 
-    try:
-        while True:
-            time.sleep(60)
-    except KeyboardInterrupt:
-        print("\n[exit]", flush=True)
+    _stop.wait()
 
 
 if __name__ == "__main__":
