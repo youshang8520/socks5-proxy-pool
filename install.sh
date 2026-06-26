@@ -21,6 +21,7 @@ fi
 
 echo "==> 创建数据目录..."
 mkdir -p "${DATA_DIR}"
+chown nobody "${DATA_DIR}"
 
 echo "==> 安装 systemd 服务..."
 sed "s|/usr/bin/python3.12|${PYTHON}|g;
