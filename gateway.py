@@ -17,6 +17,7 @@ FETCH_INTERVAL = int(os.environ.get("FETCH_INTERVAL", "86400"))   # 重新抓取
 TEST_INTERVAL  = int(os.environ.get("TEST_INTERVAL",  "1800"))    # 仅测活间隔，默认30分钟
 MIN_POOL_SIZE  = int(os.environ.get("MIN_POOL_SIZE",  "5"))       # 低于此数量立即重新抓取
 FILTER_RISK    = os.environ.get("FILTER_RISK", "1") == "1"   # 过滤高风控IP（proxy/hosting）
+VERIFY_TLS     = os.environ.get("VERIFY_TLS", "1") == "1"    # 校验证书链，确保HTTPS可用
 GEO_BATCH      = 100
 POOL_FILE      = Path(os.environ.get("POOL_FILE", "pool.json"))
 
@@ -86,21 +87,25 @@ def geolocate(ips):
     return out
 
 
-# ── SOCKS5 连通测试 ───────────────────────────────────────────────────────────
-def test_socks5(host, port, timeout=TEST_TIMEOUT):
-    t0 = time.monotonic()
+def test_tls_via_socks5(host, port, timeout=TEST_TIMEOUT):
     s = None
     try:
         s = socket.create_connection((host, port), timeout=timeout)
         s.sendall(b"\x05\x01\x00")
         if s.recv(2) != b"\x05\x00":
-            return None
-        s.sendall(b"\x05\x01\x00\x01" + socket.inet_aton("8.8.8.8") + (53).to_bytes(2, "big"))
-        if s.recv(10)[1] != 0:
-            return None
-        return (time.monotonic() - t0) * 1000
+            return False
+        target = b"example.com"
+        s.sendall(b"\x05\x01\x00\x03" + bytes([len(target)]) + target + (443).to_bytes(2, "big"))
+        resp = s.recv(10)
+        if len(resp) < 2 or resp[1] != 0:
+            return False
+        ctx = ssl.create_default_context()
+        with ctx.wrap_socket(s, server_hostname="example.com") as tls:
+            tls.settimeout(timeout)
+            tls.do_handshake()
+        return True
     except Exception:
-        return None
+        return False
     finally:
         if s:
             try: s.close()
@@ -118,18 +123,24 @@ def fetch_and_test():
         print("[pool] 过滤高风控IP {} 个".format(len(risky)), flush=True)
     results = []
     with ThreadPoolExecutor(max_workers=TEST_WORKERS) as ex:
-        futs = {ex.submit(test_socks5, ip, int(port)): (ip, int(port))
-                for e in raw for ip, port in [e.split(":", 1)]
-                if e.split(":", 1)[0] not in risky}
+        futs = {}
+        for e in raw:
+            ip, port = e.split(":", 1)
+            if ip in risky:
+                continue
+            futs[ex.submit(test_socks5, ip, int(port))] = (ip, int(port))
         for fut in as_completed(futs):
             ip, port = futs[fut]
             latency = fut.result()
-            if latency is not None:
-                results.append({
-                    "ip": ip, "port": port,
-                    "country": geo[ip]["cc"],
-                    "latency": round(latency),
-                })
+            if latency is None:
+                continue
+            if VERIFY_TLS and not test_tls_via_socks5(ip, port):
+                continue
+            results.append({
+                "ip": ip, "port": port,
+                "country": geo[ip]["cc"],
+                "latency": round(latency),
+            })
     results.sort(key=lambda x: (x["country"], x["latency"]))
     print("[pool] 可用 {} 条".format(len(results)), flush=True)
     return results
