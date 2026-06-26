@@ -13,9 +13,10 @@ LOCAL_PORT     = int(os.environ.get("PROXY_PORT", "7929"))
 CONTROL_PORT   = int(os.environ.get("CONTROL_PORT", "7930"))
 TEST_TIMEOUT   = int(os.environ.get("TEST_TIMEOUT", "5"))
 TEST_WORKERS   = int(os.environ.get("TEST_WORKERS", "150"))
-FETCH_INTERVAL = int(os.environ.get("FETCH_INTERVAL", "86400"))   # 重新抓取间隔，默认1天
+FETCH_INTERVAL = int(os.environ.get("FETCH_INTERVAL", "86400"))   # 自动抓取间隔，默认1天
 TEST_INTERVAL  = int(os.environ.get("TEST_INTERVAL",  "1800"))    # 仅测活间隔，默认30分钟
 MIN_POOL_SIZE  = int(os.environ.get("MIN_POOL_SIZE",  "5"))       # 低于此数量立即重新抓取
+MANUAL_REFRESH_ONLY = os.environ.get("MANUAL_REFRESH_ONLY", "0") == "1"   # 仅手动抓取
 FILTER_RISK    = os.environ.get("FILTER_RISK", "1") == "1"   # 过滤高风控IP（proxy/hosting）
 VERIFY_TLS     = os.environ.get("VERIFY_TLS", "1") == "1"    # 校验证书链，确保HTTPS可用
 GEO_BATCH      = 100
@@ -401,20 +402,22 @@ def _test_only():
 
 def _refresh_loop():
     global _last_fetch_time
-    if len(pool.proxies) < MIN_POOL_SIZE:
+    if len(pool.proxies) < MIN_POOL_SIZE and not MANUAL_REFRESH_ONLY:
         _do_refresh()
-    else:
+    elif len(pool.proxies) >= MIN_POOL_SIZE:
         print("[pool] 已有缓存 {} 条，跳过启动抓取".format(len(pool.proxies)), flush=True)
         _last_fetch_time = time.monotonic()
     while True:
         time.sleep(FETCH_INTERVAL)
+        if MANUAL_REFRESH_ONLY:
+            continue
         _do_refresh()
 
 
 def _test_loop():
     while True:
         time.sleep(TEST_INTERVAL)
-        if len(pool.proxies) < MIN_POOL_SIZE:
+        if len(pool.proxies) < MIN_POOL_SIZE and not MANUAL_REFRESH_ONLY:
             _do_refresh()
         elif _last_test_time < _last_fetch_time:
             _test_only()
@@ -438,7 +441,8 @@ def main():
     threading.Thread(target=ctrl.serve_forever, daemon=True).start()
     print("[ctrl] http://127.0.0.1:{}".format(CONTROL_PORT), flush=True)
 
-    threading.Thread(target=_refresh_loop, daemon=True).start()
+    if not MANUAL_REFRESH_ONLY:
+        threading.Thread(target=_refresh_loop, daemon=True).start()
     threading.Thread(target=_test_loop, daemon=True).start()
     _stop.wait()
 
