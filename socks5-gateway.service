@@ -6,7 +6,7 @@ After=network.target
 Type=simple
 User=nobody
 WorkingDirectory=/opt/socks5-proxy-pool
-ExecStart=/usr/bin/python3 /opt/socks5-proxy-pool/gateway.py
+ExecStart=/usr/bin/python3.12 /opt/socks5-proxy-pool/gateway.py
 Restart=on-failure
 RestartSec=10
 Environment=POOL_FILE=/var/lib/socks5-proxy-pool/pool.json
