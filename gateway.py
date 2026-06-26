@@ -13,7 +13,9 @@ LOCAL_PORT     = int(os.environ.get("PROXY_PORT", "7929"))
 CONTROL_PORT   = int(os.environ.get("CONTROL_PORT", "7930"))
 TEST_TIMEOUT   = int(os.environ.get("TEST_TIMEOUT", "5"))
 TEST_WORKERS   = int(os.environ.get("TEST_WORKERS", "150"))
-FETCH_INTERVAL = int(os.environ.get("FETCH_INTERVAL", "1800"))
+FETCH_INTERVAL = int(os.environ.get("FETCH_INTERVAL", "86400"))   # 重新抓取间隔，默认1天
+TEST_INTERVAL  = int(os.environ.get("TEST_INTERVAL",  "1800"))    # 仅测活间隔，默认30分钟
+MIN_POOL_SIZE  = int(os.environ.get("MIN_POOL_SIZE",  "5"))       # 低于此数量立即重新抓取
 FAIL_THRESHOLD = int(os.environ.get("FAIL_THRESHOLD", "3"))   # 连续失败几次才换代理
 GEO_BATCH      = 100
 POOL_FILE      = Path(os.environ.get("POOL_FILE", "pool.json"))
@@ -351,8 +353,39 @@ def _do_refresh():
         pool.update(proxies)
 
 
+def _test_only():
+    """对已有代理重新测活，不重新抓取。"""
+    proxies = pool.proxies[:]
+    if not proxies:
+        return
+    print("[pool] 测活 {} 条...".format(len(proxies)), flush=True)
+    alive = []
+    with ThreadPoolExecutor(max_workers=TEST_WORKERS) as ex:
+        futs = {ex.submit(test_socks5, p["ip"], p["port"]): p for p in proxies}
+        for fut in as_completed(futs):
+            p = futs[fut]
+            latency = fut.result()
+            if latency is not None:
+                alive.append({**p, "latency": round(latency)})
+    alive.sort(key=lambda x: (x["country"], x["latency"]))
+    print("[pool] 存活 {} 条".format(len(alive)), flush=True)
+    pool.update(alive)
+
+
 def _refresh_loop():
     _do_refresh()
+    while True:
+        time.sleep(FETCH_INTERVAL)
+        _do_refresh()
+
+
+def _test_loop():
+    while True:
+        time.sleep(TEST_INTERVAL)
+        if len(pool.proxies) < MIN_POOL_SIZE:
+            _do_refresh()
+        else:
+            _test_only()
 
 
 def main():
@@ -373,6 +406,7 @@ def main():
     print("[ctrl] http://127.0.0.1:{}".format(CONTROL_PORT), flush=True)
 
     threading.Thread(target=_refresh_loop, daemon=True).start()
+    threading.Thread(target=_test_loop, daemon=True).start()
     _stop.wait()
 
 
