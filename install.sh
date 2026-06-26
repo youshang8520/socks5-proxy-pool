@@ -30,7 +30,8 @@ sed "s|/usr/bin/python3.12|${PYTHON}|g;
     > /etc/systemd/system/${SERVICE}.service
 
 systemctl daemon-reload
-systemctl enable --now "${SERVICE}"
+systemctl enable "${SERVICE}"
+systemctl restart "${SERVICE}"
 
 echo ""
 echo "✓ 安装完成"
