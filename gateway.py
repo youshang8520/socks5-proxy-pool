@@ -353,9 +353,6 @@ def _do_refresh():
 
 def _refresh_loop():
     _do_refresh()
-    while True:
-        time.sleep(FETCH_INTERVAL)
-        _do_refresh()
 
 
 def main():
