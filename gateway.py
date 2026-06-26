@@ -347,14 +347,20 @@ class _ControlHandler(BaseHTTPRequestHandler):
             self._json({"error": "not found"}, 404)
 
 
+_last_fetch_time = 0.0
+_last_test_time  = 0.0
+
+
 def _do_refresh():
+    global _last_fetch_time
     proxies = fetch_and_test()
     if proxies:
         pool.update(proxies)
+        _last_fetch_time = time.monotonic()
 
 
 def _test_only():
-    """对已有代理重新测活，不重新抓取。"""
+    global _last_test_time
     proxies = pool.proxies[:]
     if not proxies:
         return
@@ -370,6 +376,7 @@ def _test_only():
     alive.sort(key=lambda x: (x["country"], x["latency"]))
     print("[pool] 存活 {} 条".format(len(alive)), flush=True)
     pool.update(alive)
+    _last_test_time = time.monotonic()
 
 
 def _refresh_loop():
@@ -384,8 +391,9 @@ def _test_loop():
         time.sleep(TEST_INTERVAL)
         if len(pool.proxies) < MIN_POOL_SIZE:
             _do_refresh()
-        else:
+        elif _last_test_time < _last_fetch_time:
             _test_only()
+        # else: 本次抓取周期内已测过，跳过
 
 
 def main():
