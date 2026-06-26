@@ -380,7 +380,12 @@ def _test_only():
 
 
 def _refresh_loop():
-    _do_refresh()
+    global _last_fetch_time
+    if len(pool.proxies) < MIN_POOL_SIZE:
+        _do_refresh()
+    else:
+        print("[pool] 已有缓存 {} 条，跳过启动抓取".format(len(pool.proxies)), flush=True)
+        _last_fetch_time = time.monotonic()
     while True:
         time.sleep(FETCH_INTERVAL)
         _do_refresh()
