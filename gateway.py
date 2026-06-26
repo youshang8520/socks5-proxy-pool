@@ -88,6 +88,26 @@ def geolocate(ips):
     return out
 
 
+def test_socks5(host, port, timeout=TEST_TIMEOUT):
+    t0 = time.monotonic()
+    s = None
+    try:
+        s = socket.create_connection((host, port), timeout=timeout)
+        s.sendall(b"\x05\x01\x00")
+        if s.recv(2) != b"\x05\x00":
+            return None
+        s.sendall(b"\x05\x01\x00\x01" + socket.inet_aton("8.8.8.8") + (53).to_bytes(2, "big"))
+        if s.recv(10)[1] != 0:
+            return None
+        return (time.monotonic() - t0) * 1000
+    except Exception:
+        return None
+    finally:
+        if s:
+            try: s.close()
+            except: pass
+
+
 def test_tls_via_socks5(host, port, timeout=TEST_TIMEOUT):
     s = None
     try:
