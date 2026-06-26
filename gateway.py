@@ -16,7 +16,7 @@ TEST_WORKERS   = int(os.environ.get("TEST_WORKERS", "150"))
 FETCH_INTERVAL = int(os.environ.get("FETCH_INTERVAL", "86400"))   # 重新抓取间隔，默认1天
 TEST_INTERVAL  = int(os.environ.get("TEST_INTERVAL",  "1800"))    # 仅测活间隔，默认30分钟
 MIN_POOL_SIZE  = int(os.environ.get("MIN_POOL_SIZE",  "5"))       # 低于此数量立即重新抓取
-FAIL_THRESHOLD = int(os.environ.get("FAIL_THRESHOLD", "3"))   # 连续失败几次才换代理
+FILTER_RISK    = os.environ.get("FILTER_RISK", "1") == "1"   # 过滤高风控IP（proxy/hosting）
 GEO_BATCH      = 100
 POOL_FILE      = Path(os.environ.get("POOL_FILE", "pool.json"))
 
@@ -59,24 +59,29 @@ def fetch_raw():
 # ── IP 地理定位 ───────────────────────────────────────────────────────────────
 def geolocate(ips):
     out = {}
+    fields = "query,countryCode,proxy,hosting" if FILTER_RISK else "query,countryCode"
     for i in range(0, len(ips), GEO_BATCH):
         chunk = ips[i:i + GEO_BATCH]
         data = json.dumps([{"query": ip} for ip in chunk]).encode()
         req = urllib.request.Request(
-            "http://ip-api.com/batch?fields=query,countryCode",
+            "http://ip-api.com/batch?fields=" + fields,
             data=data, headers={"Content-Type": "application/json"},
         )
         for attempt in range(3):
             try:
                 with urllib.request.urlopen(req, timeout=10) as r:
                     for item in json.load(r):
-                        out[item["query"]] = item.get("countryCode") or "XX"
+                        risky = bool(item.get("proxy") or item.get("hosting"))
+                        out[item["query"]] = {
+                            "cc": item.get("countryCode") or "XX",
+                            "risky": risky,
+                        }
                 break
             except Exception:
                 time.sleep(15 * (attempt + 1))
         else:
             for ip in chunk:
-                out[ip] = "XX"
+                out[ip] = {"cc": "XX", "risky": False}
         time.sleep(1.5)
     return out
 
@@ -108,17 +113,21 @@ def fetch_and_test():
     raw = fetch_raw()
     print("[pool] {} 条，开始测活...".format(len(raw)), flush=True)
     geo = geolocate([e.split(":")[0] for e in raw])
+    risky = {ip for ip, v in geo.items() if v["risky"]}
+    if risky:
+        print("[pool] 过滤高风控IP {} 个".format(len(risky)), flush=True)
     results = []
     with ThreadPoolExecutor(max_workers=TEST_WORKERS) as ex:
         futs = {ex.submit(test_socks5, ip, int(port)): (ip, int(port))
-                for e in raw for ip, port in [e.split(":", 1)]}
+                for e in raw for ip, port in [e.split(":", 1)]
+                if e.split(":", 1)[0] not in risky}
         for fut in as_completed(futs):
             ip, port = futs[fut]
             latency = fut.result()
             if latency is not None:
                 results.append({
                     "ip": ip, "port": port,
-                    "country": geo.get(ip, "XX"),
+                    "country": geo[ip]["cc"],
                     "latency": round(latency),
                 })
     results.sort(key=lambda x: (x["country"], x["latency"]))
