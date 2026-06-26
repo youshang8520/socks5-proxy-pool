@@ -101,10 +101,21 @@ def refresh():
     _get("/refresh")
     print("已触发后台刷新（异步执行，约1-3分钟）")
 
+
+def manual_fetch():
+    s = _get("/status")
+    if s.get("total", 0):
+        ans = input("当前已有缓存，确定重新抓取吗？[y/N]: ").strip().lower()
+        if ans != "y":
+            return
+    _get("/refresh")
+    print("已触发手动抓取（后台执行）")
+
 MENU = [
     ("按国家切换", select_country),
     ("按IP切换",   select_ip),
     ("轮换下一个", rotate),
+    ("手动抓取",   manual_fetch),
     ("刷新代理池", refresh),
 ]
 
